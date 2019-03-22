@@ -1,0 +1,610 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/types.h> 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+
+#define PORT_SERVER 3030
+
+// Função configurar DAC, retorna o valor de frequencia configurada no canal determinado
+ int config_DAC(int newsockfd, int err);
+
+// Função configurar canal 2, retorna valor de frequencia a ser gerado no segundo canal.
+ int config_CH2(unsigned int freq_in,int newsockfd, int err);
+ 
+// Função Ligar DAC.
+void liga_DAC(unsigned int freq_ch1,unsigned int freq_ch2,volatile void *addrs_ch1,volatile void *addrs_ch2,volatile void *addrs_rst_dds);
+
+// Função Desligar DAC.
+void desliga_DAC(volatile void *addrs_ch1,volatile void *addrs_ch2);
+
+// Função resetar as FIFOs.
+void rst_FIFOs(volatile void *addrs);
+
+// Função Configurar as FIFOs em uma frequência de amostragem e iniciar a aquisição
+int cfg_FIFOs(volatile void *addrs,int newsockfd);
+
+// Função para salvar os dados aquisitados em arquivos txt
+void saveData(volatile void *addrs_1, volatile void *addrs_2, FILE *data_1, FILE *data_2,char DataFile_ch1[],char DataFile_ch2[], int data_ch1[], int data_ch2[]);
+
+// Função para fazer a transferencia dos dados dos canais 1 e 2 pela rede
+int transferData(int newsockfd,int data_ch1[],int data_ch2[]);
+
+// Função para enviar ack _OK_ ao cliente caso servidor tenha recebido comando corretamente do cliente
+int send_ack(int newsockfd);
+
+int main(int argc, char **argv)
+{
+	
+	int fd;
+	int err;
+	volatile void *gpio_0; //envio do valor da frequencia a ser gerado no primeiro canal do DAC
+	volatile void *gpio_6; //envio do valor da frequencia a ser gerado no segundo canal do DAC
+	volatile void *gpio_1;	
+	volatile void *gpio_2;
+	volatile void *gpio_3; //gpio para controlar DIOs N 0 a 7
+	volatile void *gpio_4; //gpio para controlar DIOs P 0 a 3
+	volatile void *gpio_5; //gpio para controlar DIOs P 4 a 7
+	volatile void *gpio_7; //gpio para resetar os dois DDSs	
+	
+	int controle_erro = 0;
+	
+	int data_ch1[64];//vetor para armazenar dados da FIFO_1
+	int data_ch2[64];//vetor para armazenar dados da FIFO_2
+	
+	//frequencia do primeiro canal
+	unsigned int freq_ch1 = 0;
+	//frequecia do segundo canal
+	unsigned int freq_ch2 = 0;
+	
+	FILE *data_1;
+	//nome do arquivo txt onde os dados do canal 1 serao salvos 
+	char DataFile_ch1[] = "/tmp/dataAD_ch1.txt";
+	
+	FILE *data_2;
+	//nome do arquivo txt onde os dados do canal 2 serao salvos
+	char DataFile_ch2[] = "/tmp/dataAD_ch2.txt";	
+	
+	char buffer_word[5];	
+	buffer_word[4] = 0;
+
+	char *name = "/dev/mem";
+	if((fd = open(name, O_RDWR)) < 0) {
+		perror("open");
+		return 1;}	
+		
+	//mapeamento de memória - memórias definidas no Vivado ao desenvolver circuito em FPGA	
+	gpio_0 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41200000);
+	gpio_6 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41260000);
+	gpio_1 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41210000);
+	gpio_2 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41220000);
+	gpio_3 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41230000);
+	gpio_4 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41240000);
+	gpio_5 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41240008);
+	gpio_7 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41270000);
+	gpio_8 = mmap(NULL, sysconf(_SC_PAGESIZE),PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0x41280000);
+	
+	int sockfd, newsockfd, portno;
+	socklen_t clilen;
+	
+	//Cria duas estruturas(serv_addr e cli_addr) do tipo sockaddr_in 
+	struct sockaddr_in serv_addr, cli_addr;
+	
+	//Criar um socket()
+	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	
+	if (sockfd < 0)	
+	{		
+		perror("ERROR opening socket");		
+		return -1;	
+	}
+	
+	printf("[socket]:OK!\n");	
+	
+	bzero((char *) &serv_addr, sizeof(serv_addr));
+		
+	serv_addr.sin_family = AF_INET;
+	
+	//Servidor aceita conexão de qualquer IP
+	serv_addr.sin_addr.s_addr = INADDR_ANY; 		
+	serv_addr.sin_port = htons(PORT_SERVER);
+		
+	if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) 
+	{		
+		perror("ERROR on binding");
+		return -1;
+	}
+	
+	printf("[bind]:OK!\n");
+		
+	listen(sockfd,5); // máximo de 5 conexoes em fila
+	
+  while(1)
+  {	  
+		do{//controle de erro no recebimento do comando do cliente
+			do{// controle de erro no aceite da conexao do cliente
+				controle_erro = 0;	
+				printf("Aguardando conexao no port %d\n",ntohs(serv_addr.sin_port));
+				clilen = sizeof(cli_addr); 
+				
+				//Aceita a conexão do cliente
+				newsockfd = accept(sockfd, (struct sockaddr *) &cli_addr, &clilen);
+							
+				if (newsockfd < 0){ 
+					perror("ERROR on accept client");
+					//fecha conexao com servidor
+					close(newsockfd); 
+					controle_erro = -1;}
+					
+			}while(controle_erro == -1);
+			
+			printf("%s conectado ao servidor pelo port %d\n",inet_ntoa(cli_addr.sin_addr),ntohs(cli_addr.sin_port));
+						
+			struct timeval timeout;
+			timeout.tv_sec = 10;
+			timeout.tv_usec = 0;
+			setsockopt(newsockfd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+									
+			//Recebe o comando do cliente
+			printf("Aguardando comando do cliente\n");
+			
+			//zerar o buffer_word de tamanho 4		
+			bzero(buffer_word,4);				
+			
+			if(recv(newsockfd,buffer_word,4,0) < 0){
+				perror("ERROR on receiving command");
+				printf("Sera preciso refazer a conexao e reenviar o comando\n");
+				//fecha conexao com servidor
+				close(newsockfd);
+				controle_erro = -1;}
+				
+		}while(controle_erro == -1);
+		printf("Comando: %s\n",buffer_word);
+	  		
+		if(strncmp(buffer_word, "END_", 4) == 0)
+		{
+			if(send_ack(newsockfd) > 0 )
+			{	
+				printf("Conexao sera encerrada\n");
+				close(newsockfd);						
+				break;
+			}
+		}		
+		
+//GERACAO DOS SINAIS		
+		
+		//Configurar o DAC caso receba CDA1, configuração do primeiro canal
+		else if (strncmp( buffer_word, "CDA1", 4) == 0 )
+		{
+			if(send_ack(newsockfd) > 0 ){	
+			freq_ch1 = config_DAC(newsockfd, err);					
+			}
+		}
+		
+		//Configurar o DAC caso receba CDA2, configuração do segundo canal
+		else if (strncmp( buffer_word, "CDA2", 4) == 0 )
+		{			
+			if(send_ack(newsockfd) > 0 ){	
+			freq_ch2 = config_DAC(newsockfd, err);				
+			}
+		}
+		
+		//Ligar o DAC caso receba LDAC
+		else if (strncmp( buffer_word,"LDAC", 4) == 0)
+		{
+			if(send_ack(newsockfd) > 0 ){	
+      DAC nas frequencias definidas pelo cliente
+			liga_DAC(freq_ch1,freq_ch2,gpio_0,gpio_6,gpio_7);
+			}
+		}
+	
+	//Desligar DAC caso receba DDAC
+		else if (strncmp(buffer_word, "DDAC", 4) == 0)
+		{
+			
+			if(send_ack(newsockfd) > 0 ){				
+			desliga_DAC(gpio_0,gpio_6);
+			}
+		}		
+		
+		 //Configurar e iniciar aquisição de dados
+		else if (strncmp(buffer_word, "CADC", 4) == 0)
+		{			
+			if(send_ack(newsockfd) > 0 ){												
+			rst_FIFOs(gpio_2);
+			if (cfg_FIFOs(gpio_2, newsockfd) < 0){
+			}				
+			}
+		}
+		
+	else if (strncmp(buffer_word, "SAVE", 4) == 0)		
+		{		
+			if(send_ack(newsockfd) > 0 ){	
+			saveData(gpio_1, gpio_2,data_1,data_2,DataFile_ch1,DataFile_ch2,data_ch1,data_ch2);
+			printf("OK1\n");
+			}			
+		}
+	
+	else if (strncmp(buffer_word, "TRSF", 4) == 0)		
+		{		
+			if(send_ack(newsockfd) > 0 ){				
+			transferData(newsockfd,data_ch1,data_ch2);
+			printf("OK1\n");
+			}		
+		}	
+		
+		//Caso usuario digite algo que nao esteja definido nas opcoes, envia _NO_ para o cliente.		
+		else
+		{
+			printf("Opcao invalida\n");
+			if( send(newsockfd,"_NO_", 4, 0) < 0)
+			{
+				perror("Send ack failed");
+			}
+		}  
+  close(newsockfd);  
+  }//fim do while(1)	  
+  
+	munmap(gpio_0, sysconf(_SC_PAGESIZE));
+	munmap(gpio_6, sysconf(_SC_PAGESIZE));
+	munmap(gpio_1, sysconf(_SC_PAGESIZE));
+	munmap(gpio_2, sysconf(_SC_PAGESIZE));
+  munmap(gpio_3, sysconf(_SC_PAGESIZE));
+	munmap(gpio_4, sysconf(_SC_PAGESIZE));
+	munmap(gpio_5, sysconf(_SC_PAGESIZE));
+	munmap(gpio_7, sysconf(_SC_PAGESIZE));
+	munmap(gpio_8, sysconf(_SC_PAGESIZE));
+	
+  //Fecha conexao servidor
+	close(sockfd);
+	return 0;
+  	  
+}//end main() 
+   
+   int config_DAC(int newsockfd, int err)
+{
+	//frequencia recebida do cliente, recebido da rede
+	unsigned int fDAC;
+	//frequencia que sera gerada no DAC
+	unsigned int fDDS;	
+	
+	int controle_erro = 0;
+			
+	 //Leitura da frequencia fornecida pelo cliente	 
+	 err = recv(newsockfd,&fDAC,sizeof(fDAC),0);
+     if (err < 0) 
+	 {
+		perror("ERRO Leitura: frequencia fornecida pelo cliente, e preciso reenviar o comando");
+		return -1;		
+	 }
+	 fDDS = ntohl(fDAC); 
+	 	 
+	 //verificar se frequencia fornecida pelo cliente está dentro dos limites	 
+	 if( fDDS >= 2 && fDDS <= 10000000)											
+	 {
+		 fDDS = htonl(fDDS); 
+		 err = send(newsockfd,&fDDS,sizeof(fDDS),0);
+		 if (err < 0) 
+		{
+			error("ERRO de envio: frequencia setada pelo servidor no canal 1 ou 2");
+			return -1;
+		}
+		fDDS = ntohl(fDDS);
+		printf("Frequencia gerada pelo DAC configurada em: %dHz\n",fDDS);
+	 }
+	 
+	 //caso frequencia nao esteja dentro dos limites, setar uma frequencia padrao de 10kHz
+	 else
+	 {
+		fDDS = 10000;
+		controle_erro = -1;
+		fDDS = htonl(fDDS); 		
+		err = send(newsockfd,&fDDS,sizeof(fDDS),0);
+		if (err < 0) 
+		{
+			error(" ERRO de envio: frequencia setada pelo servidor no canal 1 ou 2");
+			return -1;			
+		}
+		printf("Frequencia fornecida pelo cliente esta fora da faixa permitida(2Hz - 10Mhz)\n");
+		fDDS = ntohl(fDDS);
+		printf("Frequencia gerada pelo DAC configurada em: %dHz\n",fDDS);
+	 }
+	 return fDDS;
+}
+
+void liga_DAC(unsigned int freq_ch1,unsigned int freq_ch2,volatile void *addrs_ch1,volatile void *addrs_ch2,volatile void *addrs_rst_dds)
+{
+	unsigned long long int freq_1 = 0; 
+	unsigned long long int freq_2 = 0; 
+		
+	// DDS configuration
+	freq_1 = freq_ch1*4294967296/125000000; 
+	freq_2 = freq_ch2*4294967296/125000000; 
+	uint32_t freq_uint32_1 = freq_1; 
+	uint32_t freq_uint32_2 = freq_2; 
+		
+	printf("Canal 1 ligado na frequencia %dHz\n", freq_ch1);  
+	printf("Canal 2 ligado na frequencia %dHz\n", freq_ch2);  
+		
+	// no local de memoria definido por (gpio_0) é configurado o valor de frequencia do canal 1
+	*((uint32_t *)(addrs_ch1)) = freq_uint32_1;
+	// no local de memoria do segundo canal do GPIO definido por (gpio_6) é configurado o valor de frequencia do canal 2
+	*((uint32_t *)(addrs_ch2)) = freq_uint32_2;
+	
+	//resetar dds utilizado, tambem para ativar/resetar outros blocos (de multiplicador, divisor e controle dac)
+	(*((uint32_t *)(addrs_rst_dds))) = ((uint32_t)1); //0000 0001
+	usleep(1000);
+	//iniciar dds
+	(*((uint32_t *)(addrs_rst_dds))) = ((uint32_t)0); //0000 0000
+}
+
+void desliga_DAC(volatile void *addrs_ch1,volatile void *addrs_ch2)
+{
+	// DDS configuration
+	uint32_t freq_uint32 = 0;	
+	*((uint32_t *)(addrs_ch1)) = freq_uint32;
+	*((uint32_t *)(addrs_ch2)) = freq_uint32;
+	printf("DAC desligado\n");  
+}
+
+// Função para resetar as FIFOs, utilizado antes de iniciar nova aquisião
+void rst_FIFOs(volatile void *addrs)
+{
+	int gpio_data;	  
+	for (int i = 0 ; i < 5 ; i++)
+	{
+		(*((uint32_t *)(addrs))) = ((uint32_t)4); //0000 0100
+		gpio_data = (*((uint32_t *)(addrs))); //leitura do que foi escrito no GPIO, deve retornar 4
+		usleep(1000);
+		
+		(*((uint32_t *)(addrs))) = ((uint32_t)(8 + 4)); //0000 1100
+		gpio_data = (*((uint32_t *)(addrs))); //leitura do que foi escrito no GPIO, deve retornar 12
+		usleep(1000);	
+	}
+}
+
+int cfg_FIFOs(volatile void *addrs,int newsockfd)
+{
+	int gpio_data;
+	int err;
+	int aquisicao_max_host = 0; 
+	int aquisicao_max_net = 0; 
+	
+	unsigned int f_net; 
+	unsigned int f_host; 
+		
+	 err = recv(newsockfd,&aquisicao_max_net,sizeof(aquisicao_max_net),0);
+	 if (err < 0) 
+	 {
+		perror("ERRO leitura: utilizacao da aquisicao maxima ou nao");
+		return -1;
+	 }
+	 	 
+	 aquisicao_max_host = ntohl(aquisicao_max_net); 
+	 if(aquisicao_max_host == 1)
+		printf("Taxa de aquisicao definida em 125MHz\n");
+	else if(aquisicao_max_host == 0)
+		printf("Taxa de aquisicao definida com relacao ao fator de divisao fornecido\n");
+	else{
+		printf("Valor fornecido nao permitido, sera definida a taxa maxima de amostragem: 125MHz\n");
+		aquisicao_max_host = 1;}
+	 	
+	//retorna o valor ao cliente
+	err = send(newsockfd,&aquisicao_max_net,sizeof(aquisicao_max_net),0);
+		 if (err < 0) 
+		{
+			error("ERRO envio: frequencia maxima (1 ou 0) setada no servidor");
+			return -1;
+		}
+	 
+	//Leitura da frequencia fornecida pelo cliente	 
+	 err = recv(newsockfd,&f_net,sizeof(f_net),0);
+     if (err < 0) 
+	 {
+		perror("ERRO leitura: fator de frequencia");
+		return -1;
+	 }
+	 f_host = ntohl(f_net); 
+	//retorna o valor ao cliente
+	err = send(newsockfd,&f_net,sizeof(f_net),0);
+		 if (err < 0) 
+		{
+			error("ERRO escrita: fator de frequencia setada no servidor");
+			return -1;
+		}
+	
+	f_host = (f_host << 4);
+	
+	//caso seja selecionado frequencia maxima de aquisicao: 125MHz
+	if (aquisicao_max_host == 1)
+	{
+		(*((uint32_t *)(addrs))) = (uint32_t) 1 + 256; 
+		usleep(1000);
+		gpio_data = (*((uint32_t *)(addrs)));
+	}
+	
+	//caso seja selecionado frequencia dividida pelo fator
+	else{
+	(*((uint32_t *)(addrs))) =  0 ; 
+	(*((uint32_t *)(addrs))) &=  ~4 ;
+	usleep(1000); 
+	(*((uint32_t *)(addrs))) |=  4 ;
+	usleep(1000); 
+  
+	for (int j = 0;j++;j<5) 
+	{
+		(*((uint32_t *)(addrs))) &=  ~8 ; 
+		(*((uint32_t *)(addrs))) |=  8 ; 
+	}
+	(*((uint32_t *)(addrs))) &=  ~4 ; 
+	(*((uint32_t *)(addrs))) |= f_host; 	
+	usleep(1000);
+	(*((uint32_t *)(addrs))) |= (uint32_t) 1;  
+	usleep(1000);
+	gpio_data = (*((uint32_t *)(addrs)));
+	}
+}
+
+
+void saveData(volatile void *addrs_1, volatile void *addrs_2, FILE *data_1, FILE *data_2,char DataFile_ch1[],char DataFile_ch2[], int data_ch1[], int data_ch2[])
+{
+	while(1)
+	{
+		volatile void *gpio_1 = addrs_1;
+		volatile void *gpio_2 = addrs_2;
+		int gpio_data;
+		
+		int full_ch1;
+		full_ch1 = (*((uint32_t *)(gpio_2 + 8)) & (1));
+		printf("Valor de full_ch1: %d\n",full_ch1);
+		
+		int full_ch2;
+		full_ch2 = (*((uint32_t *)(gpio_2 + 8)) & (4));
+		printf("Valor de full_ch2: %d\n",full_ch2);
+		
+		if(full_ch1 && full_ch2) 
+		{
+			(*((uint32_t *)(gpio_2))) &= (0);
+			gpio_data = (*((uint32_t *)(gpio_2)));
+			(*((uint32_t *)(gpio_2))) = ((uint32_t)2);
+			gpio_data = (*((uint32_t *)(gpio_2)));
+			
+			data_1 = fopen( DataFile_ch1, "w");	
+			data_2 = fopen( DataFile_ch2, "w");					
+			
+				for (int i = 0; i < 64 ; i++)
+				{
+					// escreve dados ch1
+					data_ch1[i] = (*((uint32_t *)(gpio_1)));
+					fprintf(data_1,"%d\n",data_ch1[i]);
+					// escreve dados ch2
+					data_ch2[i] = (*((uint32_t *)(gpio_1 + 8))); 
+					fprintf(data_2,"%d\n",data_ch2[i]);
+					
+					(*((uint32_t *)(gpio_2))) = ((uint32_t)2);
+					gpio_data = (*((uint32_t *)(gpio_2)));
+					usleep(1000);
+					
+					(*((uint32_t *)(gpio_2))) = ((uint32_t)10);
+					gpio_data = (*((uint32_t *)(gpio_2)));
+					usleep(1000);
+				}
+			fclose(data_1);
+			fclose(data_2);
+			break;	
+		}		
+	}
+}
+
+int transferData(int newsockfd,int data_ch1[],int data_ch2[])
+{
+	int data_net;
+	int data_host;
+	char ack[4];
+	int err;	
+		
+	for (int i = 0; i < 64; i++)
+	{		
+		bzero(ack,4);	
+
+		if(recv(newsockfd,ack,4,0) < 0){
+			perror("ERROR on receiving command");
+			return -1;
+			}
+		if(strncmp(ack, "RDY_", 4) == 0)
+		{						
+			bzero(ack,4);
+			data_net = htonl(data_ch1[i]); 				
+			err = send(newsockfd,&data_net,sizeof(int),0);
+				if (err < 0){ 
+					error("ERROR writing to socket");
+					return -1;
+					}
+					
+			err = recv(newsockfd,&data_host,sizeof(data_host),0);
+				if (err < 0) 
+				{
+					perror("ERRO:[transferData] recv ack");
+					return -1;
+				}
+				data_host = ntohl(data_host);							
+
+			if(data_host == data_ch1[i])
+			{
+				if( send(newsockfd,"_OK_", 4, 0) < 0)
+				{
+					perror("Send ack failed");					
+				}								
+			}
+			else 
+			{
+				if( send(newsockfd,"_NO_", 4, 0) < 0)
+				{
+					perror("Send ack failed");					
+				}					
+			}			
+		
+		}	
+		bzero(ack,4);	
+		
+		if(recv(newsockfd,ack,4,0) < 0){
+			perror("ERROR on receiving command");
+			return -1;
+			}
+		if(strncmp(ack, "RDY_", 4) == 0)
+		{	
+			bzero(ack,4);
+			data_net = htonl(data_ch2[i]);					
+			err = send(newsockfd,&data_net,sizeof(int),0);
+				if (err < 0){ 
+					error("ERROR writing to socket");
+					return -1;}
+					
+			err = recv(newsockfd,&data_host,sizeof(data_host),0);
+				if (err < 0) 
+				{
+					perror("ERRO:[transferData] recv ack");
+					return -1;
+				}
+			data_host = ntohl(data_host);				
+
+      if(data_host == data_ch2[i])
+			{
+				//Retorna _OK_ para o cliente caso dado enviado foi o mesmo do recebido pelo cliente
+				if( send(newsockfd,"_OK_", 4, 0) < 0)
+				{
+					perror("Send ack failed");					
+				}								
+			}
+			else 
+			{
+				//Retorna _NO_ para o cliente caso dado eviado seja diferento do recebido pelo cliente
+				if( send(newsockfd,"_NO_", 4, 0) < 0)
+				{
+					perror("Send ack failed");					
+				}					
+			}
+		}		
+	}
+}
+
+//funcao para envio do ack _OK_ caso tenha recebido o comando corretamente do cliente
+int send_ack(int newsockfd)
+{
+	int controle_erro = 1;	
+	//Retorna _OK_ para o cliente caso tenha recebido esse comando
+	if( send(newsockfd,"_OK_", 4, 0) < 0)
+		{
+			perror("Send ack failed");
+			controle_erro = -1;
+			//Fecha conexao servidor
+			close(newsockfd);
+		}
+	//retorna 1 se ack foi enviado com sucesso e -1 se occorreu problema no envio do ack	
+	return controle_erro;			
+}
