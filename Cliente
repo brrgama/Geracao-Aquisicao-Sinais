@@ -1,0 +1,499 @@
+%Software cliente, utilizado para interação com o usuário. Resposável por apenas enviar comandos ao servidor. 
+%O servidor que executa as funções junto ao FPGA.
+
+function varargout = Cliente(varargin)
+
+gui_Singleton = 1;
+gui_State = struct('gui_Name',       mfilename, ...
+                   'gui_Singleton',  gui_Singleton, ...
+                   'gui_OpeningFcn', @Cliente_OpeningFcn, ...
+                   'gui_OutputFcn',  @Cliente_OutputFcn, ...
+                   'gui_LayoutFcn',  [] , ...
+                   'gui_Callback',   []);
+if nargin && ischar(varargin{1})
+    gui_State.gui_Callback = str2func(varargin{1});
+end
+
+if nargout
+    [varargout{1:nargout}] = gui_mainfcn(gui_State, varargin{:});
+else
+    gui_mainfcn(gui_State, varargin{:});
+end
+
+function Cliente_OpeningFcn(hObject, eventdata, handles, varargin)
+
+handles.output = hObject;
+
+% Update handles structure
+guidata(hObject, handles);
+
+function varargout = Cliente_OutputFcn(hObject, eventdata, handles) 
+% Get default command line output from handles structure
+varargout{1} = handles.output;
+
+function IpText_CreateFcn(hObject, eventdata, handles)
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+function ConnectionPortText_CreateFcn(hObject, eventdata, handles)
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+function Freq1Text_CreateFcn(hObject, eventdata, handles)
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+function Freq2Text_CreateFcn(hObject, eventdata, handles)
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+function AquisicaoCana1PopUpMenu_CreateFcn(hObject, eventdata, handles)
+
+if ispc && isequal(get(hObject,'BackgroundColor'), get(0,'defaultUicontrolBackgroundColor'))
+    set(hObject,'BackgroundColor','white');
+end
+
+
+%Função para gerar os sinais nas frequências definidas
+function GerarSinaisPushButton_Callback(hObject, eventdata, handles)
+
+    freq_ch1 = str2num(handles.Freq1Text.String); %frequencia canal 1    
+    freq_ch2 = str2num(handles.Freq2Text.String); %frequencia canal 2    
+    ipServer = handles.IpText.String; %ip do servidor
+    connectionPort = str2num(handles.ConnectionPortText.String); %porta de conexao
+    fprintf('freq_ch1: %d\n',freq_ch1);
+    fprintf('freq_ch2: %d\n',freq_ch2);
+    fprintf('ip: %s\n',ipServer);
+    fprintf('port: %d\n',connectionPort);       
+    
+    controleErro = 0;
+  
+%Configuracao do DAC canal 1
+
+%Comando de configurar DAC, configura a frequencia a ser gerada no primero
+%canal de saída
+cmd = 'CDA1';
+
+%Conexão ao servidor no ip e port definidos
+Cliente = tcpip(ipServer,connectionPort,'NetworkRole','client');
+
+%abrir conexão
+fopen(Cliente);
+fprintf('%s: conectado ao %s pelo port %d\n',cmd,Cliente.RemoteHost,Cliente.RemotePort)
+
+%enviar o comando CDA1 ao servidor
+fwrite(Cliente, cmd, 'char')
+
+rcv = fread(Cliente,4, 'char'); 
+
+msg = char(rcv);
+
+%Cliente recebeu _OK_ do servidor
+if strncmp(msg, '_OK_', 4)
+    %servidor recebeu comando corretamente
+    fprintf('Enviou %s e recebeu %s\n',cmd,msg);
+    
+    %enviar a frequencia definida a ser gerada no canal 1
+    fwrite(Cliente, freq_ch1, 'uint32');
+    
+    %Espera ACK. Servidor retorna a frequencia que foi setada.
+    freqACK = fread(Cliente, 1, 'uint32');
+    
+    %Se a frequencia enviada pelo cliente for igual a seta pelo servidor
+    if freqACK == freq_ch1
+        
+        %Servidor setou a frequencia fornecida pelo cliente
+        fprintf('Enviou %d recebeu %d\n',freq_ch1,freqACK);
+        fclose(Cliente);
+        controleErro = 0; %sucesso
+        h = msgbox('Sinal do canal 1 gerado com sucesso','Success');
+        
+    else
+    
+        fprintf('ERRO: Valor de frequencia fornecido esta fora dos limites permitidos( 2Hz - 10MHz)\n');
+        fprintf('A frequencia sera definida em 10KHz, para redefinir a frequencia e preciso reenviar o valor\n');
+        fclose(Cliente);
+        h = msgbox({'Valor de frequencia fornecido para o canal 1 esta fora dos limites permitidos( 2Hz - 10MHz)' 'A frequencia sera definida em 10KHz, para redefinir a frequencia e preciso reenviar o valor'}, 'Error','error');       
+        controleErro = -1; %algum erro ocorreu
+    end
+    
+    %comando enviado ao servidor nao foi encontrado. Cliente recebeu _NO_ do servidor   
+else    
+    fprintf('ERRO: Comando invalido.Enviou %s recebeu %s\n', cmd, msg);
+    fprintf('Sera preciso reenviar o comando\n');
+    fclose(Cliente);
+    controleErro = -1;  
+    h = msgbox('Ocorreu um erro no envio da frequencia do primeiro canal, sera preciso reenviar o valor','Error','error');
+end
+
+fprintf('status: %s\n\n',Cliente.Status);
+
+%Configuracao do DAC canal 2
+
+%Comando de configurar DAC, configura a frequencia a ser gerada no segundo
+%canal de saida
+cmd = 'CDA2';
+
+%Conexão ao servidor no ip e port definidos
+Cliente = tcpip(ipServer,connectionPort,'NetworkRole','client');
+
+%abrir conexão
+fopen(Cliente);
+fprintf('%s: conectado ao %s pelo port %d\n',cmd,Cliente.RemoteHost,Cliente.RemotePort)
+
+%enviar o comando CDAC ao servidor
+fwrite(Cliente, cmd, 'char')
+rcv = fread(Cliente,4, 'char'); 
+msg = char(rcv);
+
+%Cliente recebeu _OK_ do servidor
+if strncmp(msg, '_OK_', 4)
+    %servidor recebeu comando corretamente
+    fprintf('Enviou %s e recebeu %s\n',cmd,msg);
+            
+    %enviar a frequencia definida a ser gerada no canal 2
+    fwrite(Cliente, freq_ch2, 'uint32');
+    
+    %Espera ACK. Servidor retorna a frequencia que foi setada.
+    freqACK = fread(Cliente, 1, 'uint32');
+    
+    %Se a frequencia enviada pelo cliente for igual a seta pelo servidor
+    if freqACK == freq_ch2
+        
+        %Servidor setou a frequencia fornecida pelo cliente
+        fprintf('Enviou %d recebeu %d\n',freq_ch2,freqACK);
+        fclose(Cliente);
+        controleErro = 0; %sucesso
+        h = msgbox('Sinal do canal 2 gerado com sucesso','Success');
+        
+    else        
+        fprintf('ERRO: Valor de frequencia fornecido esta fora dos limites permitidos( 2Hz - 10MHz)\n');
+        fprintf('A frequencia sera definida em 10KHz, para redefinir a frequencia e preciso reenviar o valor\n');
+        fclose(Cliente);
+        controleErro = -1; %algum erro ocorreu
+        h = msgbox({'Valor de frequencia fornecido para o canal 2 esta fora dos limites permitidos( 2Hz - 10MHz)' 'A frequencia sera definida em 10KHz, para redefinir a frequencia e preciso reenviar o valor'}, 'Error','error');       
+    end
+    
+%comando enviado ao servidor nao foi encontrado. Cliente recebeu _NO_ do servidor   
+else    
+    fprintf('ERRO: Comando invalido.Enviou %s recebeu %s\n', cmd, msg);
+    fprintf('Sera preciso reenviar o comando\n');
+    fclose(Cliente);
+    controleErro = -1;    
+    h = msgbox('Ocorreu um erro no envio da frequencia do segundo canal, sera preciso reenviar o valor','Error','error');
+end
+
+fprintf('status: %s\n\n',Cliente.Status);
+
+%==========================================================================
+%==========================================================================
+%Ligar DAC
+
+%Comando de ligar DAC
+cmd = 'LDAC';
+
+%Conexão ao servidor
+Cliente = tcpip(ipServer,connectionPort,'NetworkRole','client');
+
+%Abrir conexão
+fopen(Cliente);
+fprintf('%s: conectado ao %s pelo port %d\n',cmd,Cliente.RemoteHost,Cliente.RemotePort)
+
+%enviar ao servidor o comando LDAC
+fwrite(Cliente, cmd, 'char')
+
+rcv = fread(Cliente,4, 'char');
+
+%Converter mensagem para o tipo CHAR.
+msg = char(rcv);
+
+%caso cliente tenha recebido _OK_
+if strncmp(msg, '_OK_', 4)
+    %servidor recebeu comando corretamente
+    fprintf('Enviou %s e recebeu %s\n',cmd,msg);
+    fclose(Cliente);
+    controleErro = 0;
+    
+%Caso cliente tenha recebido _NO_
+else    
+    %comando enviado ao servidor nao foi encontrado
+    fprintf('ERRO: Comando invalido.Enviou %s recebeu %s\n', cmd, msg);
+    fprintf('Sera preciso reenviar o comando\n');
+    fclose(Cliente);
+    controleErro = -1;    
+end
+
+fprintf('status: %s\n\n',Cliente.Status);
+%Função para realizar a aquisição dos sinais na frequência de amostragem
+%definida
+
+
+function AquisicaoSinaisPushButton_Callback(hObject, eventdata, handles)
+   
+    set(handles.AquisicaoSinaisPushButton,'Enable','off')
+    freq_ch1 = str2num(handles.Freq1Text.String); %frequencia canal 1
+    freq_ch2 = str2num(handles.Freq2Text.String); %frequencia canal 2
+    ipServer = handles.IpText.String; %ip do servidor
+    connectionPort = str2num(handles.ConnectionPortText.String); %porta de conexao
+    fprintf('freq_ch1: %d\n',freq_ch1);
+    fprintf('freq_ch2: %d\n',freq_ch2);
+    fprintf('ip: %s\n',ipServer);
+    fprintf('port: %d\n',connectionPort);    
+    
+     allItems_canal1 = get(handles.AquisicaoCana1PopUpMenu,'string')
+    selectedIndex_canal1 = get(handles.AquisicaoCana1PopUpMenu,'Value')
+    selectedItem_canal1 = allItems_canal1(selectedIndex_canal1,:)
+              
+    if (selectedIndex_canal1 == 1) 
+        freq_max = 1;
+        handles.freq_max = 1;
+        f = 0;
+        handles.f = 0;
+    else 
+        freq_max = 0;
+        handles.freq_max = 0;
+        f = selectedIndex_canal1 - 2;
+        handles.f = selectedIndex_canal1 - 2; 
+    end
+    
+%==========================================================================
+%==========================================================================
+%Configurar ADC
+
+%comando para configurar ADC e iniciar aquisicao de dados
+cmd = 'CADC';
+
+%Cria conexão com o servidor no ip e porta definidos
+Cliente = tcpip(ipServer,connectionPort,'NetworkRole','client');
+
+%abre a conexão
+fopen(Cliente);
+fprintf('%s: conectado ao %s pelo port %d\n',cmd,Cliente.RemoteHost,Cliente.RemotePort)
+
+%Envia o comando CADC ao servidor
+fwrite(Cliente, cmd, 'char')
+
+rcv = fread(Cliente,4, 'char'); 
+%Converte resposta do servidor para o tipo CHAR
+msg = char(rcv);
+
+%caso cliente receba _OK_
+if strncmp(msg, '_OK_', 4)
+    %servidor recebeu comando corretamente
+    fprintf('Enviou %s e recebeu %s\n',cmd,msg);    
+    
+    fwrite(Cliente, freq_max, 'uint32');
+    
+    %Espera ACK. Recebe o valor setado no servidor para a frequencia
+    freq_max_ACK = fread(Cliente, 1, 'uint32');
+    
+    fprintf('Enviou %d recebeu %d\n',freq_max,freq_max_ACK);
+    
+    if(freq_max == freq_max_ACK)
+        fprintf('Frequencia enviado pelo cliente foi setada pelo servidor\n');
+        fprintf('Frequencia maxima definida: %d\n ',freq_max_ACK);        
+    else
+        fprintf('Frequencia enviada pelo cliente nao foi setada pelo servidor\n');
+        fprintf('Frequecia maxima definida: %d\n',freq_max_ACK);        
+    end
+    
+   
+    fwrite(Cliente, f, 'uint32');
+    
+%    Espera ACK. Recebe valor de f definido no servidor
+     f_ACK = fread(Cliente, 1, 'uint32');     
+     fprintf('Enviou %d recebeu %d\n',f,f_ACK);        
+     
+     if(f == f_ACK)
+         fprintf('Fator de frequencia enviada pelo cliente foi setada pelo servidor\n');
+         fprintf('Fator de frequencia definido: %d\n',f_ACK);
+     else
+         fprint('Fator de frequencia enviado pelo cliente nao foi setado pelo servidor\n');
+         fprintf('Fator de frequencia definido: %d\n',f_ACK);
+     end
+     
+    fclose(Cliente);
+    controleErro = 0; %sucesso
+
+%caso cliente receba _NO_    
+else
+    %comando enviado ao servidor nao foi encontrado
+    fprintf('ERRO: Comando invalido.Enviou %s recebeu %s\n', cmd, msg);
+    fprintf('Sera preciso reenviar o comando\n');
+    fclose(Cliente);
+    controleErro = -1;    
+end
+
+fprintf('status: %s\n\n',Cliente.Status);
+
+% Update handles structure
+guidata(hObject, handles);
+
+
+%==========================================================================
+%==========================================================================
+%Salvar dados em arquivo txt na memoria do ARM
+
+ipServer = handles.IpText.String; %ip do servidor
+connectionPort = str2num(handles.ConnectionPortText.String); %porta de conexao
+
+%arquivos que serao salvos os dados dos canais 1 e 2
+fileID_ch1 = fopen('dataAD_ch1.txt','w');
+fileID_ch2 = fopen('dataAD_ch2.txt','w');
+
+%comando para salvar dados
+cmd = 'SAVE';
+
+%Cria conexão com o servidor no ip e porta definidos
+Cliente = tcpip(ipServer,connectionPort,'NetworkRole','client');
+
+%abre a conexão
+fopen(Cliente);
+fprintf('%s: conectado ao %s pelo port %d\n',cmd,Cliente.RemoteHost,Cliente.RemotePort)
+
+%Envia o comando SAVE ao servidor
+fwrite(Cliente, cmd, 'char')
+
+rcv = fread(Cliente,4, 'char'); 
+%Converte resposta do servidor para o tipo CHAR
+msg = char(rcv);
+
+%caso cliente receba _OK_
+if strncmp(msg, '_OK_', 4)
+    %servidor recebeu comando corretamente
+    fprintf('Enviou %s e recebeu %s\n',cmd,msg);
+    fclose(Cliente);
+    controleErro = 0;
+            
+%caso cliente receba _NO_    
+else
+    %comando enviado ao servidor nao foi encontrado
+    fprintf('ERRO: Comando invalido.Enviou %s recebeu %s\n', cmd, msg);
+    fprintf('Sera preciso reenviar o comando\n');
+    fclose(Cliente);
+    controleErro = -1;    
+end
+
+fprintf('status: %s\n\n',Cliente.Status);
+
+%==========================================================================
+%==========================================================================
+%Receber os dados do servidor pela rede
+cmd = 'TRSF';
+
+%Cria conexão com o servidor no ip e porta definidos
+Cliente = tcpip(ipServer,connectionPort,'NetworkRole','client');
+
+%abre a conexão
+fopen(Cliente);
+fprintf('%s: conectado ao %s pelo port %d\n',cmd,Cliente.RemoteHost,Cliente.RemotePort)
+
+%Envia o comando TRSF ao servidor
+fwrite(Cliente, cmd, 'char')
+
+rcv = fread(Cliente,4, 'char'); 
+%Converte resposta do servidor para o tipo CHAR
+msg = char(rcv);
+
+%caso cliente receba _OK_
+if strncmp(msg, '_OK_', 4)
+    %servidor recebeu comando corretamente
+    fprintf('Enviou %s e recebeu %s\n',cmd,msg);
+    
+
+dados = zeros(64,2,'int32');    
+%Recebe os dados do servidor e salva no computador
+for i = 1 : 1 : 64
+    
+    a = int32(fread(Cliente,1,'int32'));
+    fwrite(Cliente,'_OK_','char');
+    b = int32(fread(Cliente,1,'int32'));    
+    fwrite(Cliente,'_OK_','char');      
+    dados(i,1) = a;
+    dados(i,2) = b;
+    fprintf('%d %d %d %d \n',a,dados(i,1),b,dados(i,2));
+end
+
+    
+    fclose(Cliente);
+    controleErro = 0;
+            
+%caso cliente receba _NO_    
+else
+    %comando enviado ao servidor nao foi encontrado
+    fprintf('ERRO: Comando invalido.Enviou %s recebeu %s\n', cmd, msg);
+    fprintf('Sera preciso reenviar o comando\n');
+    fclose(Cliente);
+    controleErro = -1;    
+end
+
+fprintf('status: %s\n\n',Cliente.Status);
+%==========================================================================
+%==========================================================================
+%Salvar dados em um arquivo texto .txt
+
+for i = 1:1:64    
+    fprintf(fileID_ch1,'%d\n',dados(i,1));
+    fprintf(fileID_ch2,'%d\n',dados(i,2));
+end
+fclose(fileID_ch1);
+fclose(fileID_ch2);
+
+h = msgbox('Aquisição concluida. Dados foram salvos com sucesso','Success');
+set(handles.AquisicaoSinaisPushButton,'Enable','on');
+
+%Função para abrir os sinas obtidos 
+function GerarGrafPushButton_Callback(hObject, eventdata, handles)
+
+freq1 = str2num(handles.Freq1Text.String); %frequencia canal 1
+freq2 = str2num(handles.Freq2Text.String); %frequencia canal 2
+
+
+if handles.freq_max == 1
+    f_amostragem = 125000000;
+    
+else
+    f_amostragem = 125000000/(2^(handles.f+1));
+    
+end
+
+fileID_ch1 = fopen('dataAD_ch1.txt','r');
+fileID_ch2 = fopen('dataAD_ch2.txt','r');
+
+data_1 = fscanf(fileID_ch1,'%d');
+data_2 = fscanf(fileID_ch2,'%d');
+
+fclose(fileID_ch1);
+fclose(fileID_ch2);
+
+data_1 = (data_1 * 1/8192);
+data_2 = (data_2* 1/8192 );
+
+pts_ciclo_ch1 = round(f_amostragem / freq1); 
+
+
+data_1_ciclo = data_1(64 - pts_ciclo_ch1 + 1 : 64);
+data_2_ciclo = data_2(64 - pts_ciclo_ch1 + 1 : 64);
+
+mean_data_1_ciclo = mean(data_1_ciclo);
+mean_data_2_ciclo = mean(data_2_ciclo);
+
+data_1_ciclo_correcao_media = data_1 - mean_data_1_ciclo;
+data_2_ciclo_correcao_media = data_2 - mean_data_2_ciclo;
+
+t = (0:(64 - 1 ))./f_amostragem;
+figure(1)
+plot(t,data_1_ciclo_correcao_media,'k')
+title('Sinais canal 1 e canal 2');
+xlabel('Tempo[Segundos]');
+ylabel('Amplitude [Volts]');
+grid on
+hold on
+plot(t,data_2_ciclo_correcao_media)
+legend('Canal 1','Canal 2')
+
+
