@@ -1,3 +1,5 @@
+//Software servidor, recebe comandos do software do cliente e executa as funções conforme o comando recebido. As funções executadas comunicam
+//diretamente com o FPGA da placa.
 
 #include <stdio.h>
 #include <stdlib.h>
